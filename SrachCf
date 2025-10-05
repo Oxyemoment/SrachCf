@@ -1,0 +1,521 @@
+import sys
+import subprocess
+import importlib
+import random
+import time
+import asyncio
+from datetime import datetime, timedelta
+
+# Список необходимых модулей
+required_modules = [
+    "telegram",
+    "pytz"
+]
+
+# Функция для установки модулей
+def install_module(module_name):
+    try:
+        # Пробуем импортировать модуль
+        importlib.import_module(module_name)
+        print(f"✅ Модуль {module_name} уже установлен")
+    except ImportError:
+        print(f"📦 Устанавливаем модуль {module_name}...")
+        try:
+            # Устанавливаем через pip
+            subprocess.check_call([sys.executable, "-m", "pip", "install", module_name])
+            print(f"✅ Модуль {module_name} успешно установлен")
+        except subprocess.CalledProcessError:
+            print(f"❌ Ошибка установки модуля {module_name}")
+            sys.exit(1)
+
+# Устанавливаем все необходимые модули
+print("🔧 Проверяем и устанавливаем необходимые модули...")
+for module in required_modules:
+    if module == "telegram":
+        install_module("python-telegram-bot")
+    else:
+        install_module(module)
+
+print("✅ Все модули установлены, запускаем бота...")
+
+# Теперь импортируем модули после установки
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+import pytz
+import logging
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
+# Токен бота (замени на свой)
+BOT_TOKEN = "8377590354:AAFMIlw5gB6qNgJVNQ7j6gjD_LW5BUS5F3Y"
+
+# Словарь для хранения времени вступления участников
+user_join_times = {}
+
+# Словарь для хранения времени последнего использования команды /ship
+ship_cooldowns = {}
+
+# Словарь для хранения напоминаний
+user_reminders = {}
+
+# Время последнего использования команды /kirbizzlery в чате
+kirbizzlery_cooldown = {}
+
+# Список персонажей для шиппинга
+SHIP_CHARACTERS = [
+    "Кирбин", "олязериззлер", "оса", "эмилия", "яо", "сваст", 
+    "нежизнеспособная", "илюша", "сисярубка", "нексарос", "всчатиз", 
+    "бахлик", "инь", "нурофен", "трамбон", "бэзил", "моль", 
+    "пророк", "скиттл", "лилит"
+]
+
+async def kirbizzlery_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /kirbizzlery - обратный отсчет с изменением сообщения"""
+    try:
+        chat_id = update.effective_chat.id
+        current_time = time.time()
+        
+        # Проверяем кулдаун для всего чата
+        if chat_id in kirbizzlery_cooldown:
+            time_passed = current_time - kirbizzlery_cooldown[chat_id]
+            if time_passed < 300:  # 5 минут = 300 секунд
+                remaining_time = 300 - int(time_passed)
+                minutes = remaining_time // 60
+                seconds = remaining_time % 60
+                await update.message.reply_text(
+                    f"⏳ Команда /kirbizzlery будет доступна через {minutes}м {seconds}с!"
+                )
+                return
+        
+        # Обновляем время последнего использования для чата
+        kirbizzlery_cooldown[chat_id] = current_time
+        
+        # Отправляем начальное сообщение
+        message = await update.message.reply_text("начинаю снос чата через..")
+        
+        # Запускаем обратный отсчет
+        asyncio.create_task(countdown_timer(context.bot, chat_id, message.message_id))
+        
+    except Exception as e:
+        logging.error(f"Ошибка в команде /kirbizzlery: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при запуске таймера")
+
+async def countdown_timer(bot, chat_id, message_id):
+    """Функция обратного отсчета с изменением сообщения"""
+    try:
+        # Обратный отсчет от 10 до 1
+        for i in range(10, 0, -1):
+            # Редактируем сообщение с новым числом
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=f"начинаю снос чата через.. {i}"
+            )
+            # Ждем 1 секунду
+            await asyncio.sleep(1)
+        
+        # После окончания таймера меняем на финальное сообщение
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="прости но нет"
+        )
+        
+    except Exception as e:
+        logging.error(f"Ошибка в таймере: {e}")
+
+async def reminder_create_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /напоминание создать - создает напоминание"""
+    try:
+        user_id = update.effective_user.id
+        
+        # Проверяем правильность формата команды
+        if len(context.args) < 4:
+            await update.message.reply_text(
+                "❌ Неправильный формат команды!\n\n"
+                "Используйте:\n"
+                "/напоминание создать <часы> <минуты> <секунды> <текст напоминания>\n\n"
+                "Пример:\n"
+                "/напоминание создать 1 30 0 Позвонить маме"
+            )
+            return
+        
+        # Парсим время
+        try:
+            hours = int(context.args[0])
+            minutes = int(context.args[1])
+            seconds = int(context.args[2])
+        except ValueError:
+            await update.message.reply_text("❌ Время должно быть числом!")
+            return
+        
+        # Проверяем валидность времени
+        if hours < 0 or minutes < 0 or seconds < 0:
+            await update.message.reply_text("❌ Время не может быть отрицательным!")
+            return
+        
+        if minutes >= 60 or seconds >= 60:
+            await update.message.reply_text("❌ Минуты и секунды должны быть меньше 60!")
+            return
+        
+        # Получаем текст напоминания
+        reminder_text = ' '.join(context.args[3:])
+        if not reminder_text:
+            await update.message.reply_text("❌ Текст напоминания не может быть пустым!")
+            return
+        
+        # Вычисляем общее время в секундах
+        total_seconds = hours * 3600 + minutes * 60 + seconds
+        
+        if total_seconds == 0:
+            await update.message.reply_text("❌ Время не может быть нулевым!")
+            return
+        
+        # Создаем ID напоминания
+        reminder_id = str(int(time.time()))
+        
+        # Сохраняем напоминание
+        if user_id not in user_reminders:
+            user_reminders[user_id] = {}
+        
+        user_reminders[user_id][reminder_id] = {
+            'text': reminder_text,
+            'create_time': time.time(),
+            'trigger_time': time.time() + total_seconds,
+            'time_string': f"{hours}ч {minutes}м {seconds}с"
+        }
+        
+        # Запускаем задачу для напоминания
+        asyncio.create_task(
+            send_reminder(
+                context.bot,
+                user_id,
+                reminder_id,
+                total_seconds
+            )
+        )
+        
+        await update.message.reply_text(
+            f"✅ Напоминание создано!\n\n"
+            f"⏰ Через: {hours}ч {minutes}м {seconds}с\n"
+            f"📝 Текст: {reminder_text}\n"
+            f"🆔 ID: {reminder_id}"
+        )
+        
+    except Exception as e:
+        logging.error(f"Ошибка в команде /напоминание создать: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при создании напоминания")
+
+async def send_reminder(bot, user_id, reminder_id, delay):
+    """Отправляет напоминание через указанное время"""
+    try:
+        # Ждем указанное время
+        await asyncio.sleep(delay)
+        
+        # Проверяем существует ли еще напоминание
+        if (user_id in user_reminders and 
+            reminder_id in user_reminders[user_id]):
+            
+            reminder = user_reminders[user_id][reminder_id]
+            
+            # Отправляем напоминание
+            await bot.send_message(
+                chat_id=user_id,
+                text=f"🔔 Напоминание!\n\n{reminder['text']}"
+            )
+            
+            # Удаляем напоминание после отправки
+            del user_reminders[user_id][reminder_id]
+            
+            # Если у пользователя больше нет напоминаний, удаляем его запись
+            if not user_reminders[user_id]:
+                del user_reminders[user_id]
+                
+    except Exception as e:
+        logging.error(f"Ошибка при отправке напоминания: {e}")
+
+async def reminders_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /напоминания - показывает список личных напоминаний"""
+    try:
+        user_id = update.effective_user.id
+        
+        # Проверяем есть ли напоминания у пользователя
+        if user_id not in user_reminders or not user_reminders[user_id]:
+            await update.message.reply_text("📭 У вас нет активных напоминаний!")
+            return
+        
+        # Формируем список напоминаний
+        reminders_list = []
+        current_time = time.time()
+        
+        for reminder_id, reminder in user_reminders[user_id].items():
+            time_left = int(reminder['trigger_time'] - current_time)
+            
+            if time_left > 0:
+                hours_left = time_left // 3600
+                minutes_left = (time_left % 3600) // 60
+                seconds_left = time_left % 60
+                
+                time_left_str = f"{hours_left}ч {minutes_left}м {seconds_left}с"
+                
+                reminders_list.append(
+                    f"🆔 {reminder_id}\n"
+                    f"⏰ Через: {time_left_str}\n"
+                    f"📝 {reminder['text']}\n"
+                )
+        
+        if not reminders_list:
+            await update.message.reply_text("📭 У вас нет активных напоминаний!")
+            return
+        
+        reminders_text = "\n".join(reminders_list)
+        await update.message.reply_text(
+            f"📋 Ваши напоминания ({len(reminders_list)}):\n\n{reminders_text}"
+        )
+        
+    except Exception as e:
+        logging.error(f"Ошибка в команде /напоминания: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при получении списка напоминаний")
+
+async def reminder_delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /напоминание удалить - удаляет напоминание"""
+    try:
+        user_id = update.effective_user.id
+        
+        if len(context.args) < 1:
+            await update.message.reply_text(
+                "❌ Укажите ID напоминания!\n\n"
+                "Используйте: /напоминание удалить <ID>\n"
+                "ID можно посмотреть в /напоминания"
+            )
+            return
+        
+        reminder_id = context.args[0]
+        
+        # Проверяем существует ли напоминание
+        if (user_id not in user_reminders or 
+            reminder_id not in user_reminders[user_id]):
+            await update.message.reply_text("❌ Напоминание с таким ID не найдено!")
+            return
+        
+        # Удаляем напоминание
+        reminder_text = user_reminders[user_id][reminder_id]['text']
+        del user_reminders[user_id][reminder_id]
+        
+        # Если у пользователя больше нет напоминаний, удаляем его запись
+        if not user_reminders[user_id]:
+            del user_reminders[user_id]
+        
+        await update.message.reply_text(
+            f"✅ Напоминание удалено!\n\n"
+            f"📝 Текст: {reminder_text}\n"
+            f"🆔 ID: {reminder_id}"
+        )
+        
+    except Exception as e:
+        logging.error(f"Ошибка в команде /напоминание удалить: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при удалении напоминания")
+
+async def reminder_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда помощи по напоминаниям"""
+    help_text = (
+        "🔔 Система напоминаний\n\n"
+        "Доступные команды:\n"
+        "/напоминание создать <ч> <м> <с> <текст> - создать напоминание\n"
+        "/напоминания - список ваших напоминаний\n"
+        "/напоминание удалить <ID> - удалить напоминание\n"
+        "/напоминание помощь - эта справка\n\n"
+        "Примеры:\n"
+        "/напоминание создать 1 0 0 Позвонить маме\n"
+        "/напоминание создать 0 30 0 Принять лекарство\n"
+        "/напоминание создать 0 0 10 Скоро начало стрима"
+    )
+    await update.message.reply_text(help_text)
+
+async def ship_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /ship - создает случайный шипп с ограничением 25 секунд"""
+    try:
+        user_id = update.effective_user.id
+        current_time = time.time()
+        
+        # Проверяем кулдаун
+        if user_id in ship_cooldowns:
+            time_passed = current_time - ship_cooldowns[user_id]
+            if time_passed < 25:
+                remaining_time = 25 - int(time_passed)
+                await update.message.reply_text(
+                    f"⏳ Подожди еще {remaining_time} секунд перед следующим шиппом!"
+                )
+                return
+        
+        # Обновляем время последнего использования
+        ship_cooldowns[user_id] = current_time
+        
+        # Выбираем двух случайных персонажей
+        char1, char2 = random.sample(SHIP_CHARACTERS, 2)
+        
+        # Создаем шипп в формате "*** х ***"
+        ship_text = f"*** {char1} × {char2} ***"
+        
+        # Добавляем случайный комментарий для веселья
+        comments = [
+            "✨ Идеальная пара!",
+            "💕 Влюблены по уши!",
+            "🔥 Искры летят!",
+            "💘 Судьба свела!",
+            "🌟 Звезды сошлись!",
+            "💞 Совместимость 100%!",
+            "💒 Скоро свадьба?",
+            "💋 Романтика!",
+            "💖 Прекрасный матч!",
+            "💓 Любовь с первого взгляда!"
+        ]
+        
+        comment = random.choice(comments)
+        
+        # Формируем окончательное сообщение
+        message = f"{ship_text}\n{comment}"
+        
+        await update.message.reply_text(message)
+        
+    except Exception as e:
+        logging.error(f"Ошибка в команде /ship: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при создании шиппа")
+
+async def ss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /ss - дает активную ссылку на чат и на @SrachC0NF"""
+    try:
+        chat = update.effective_chat
+        
+        # Формируем ссылку на текущий чат
+        if chat.username:
+            chat_link = f"https://t.me/{chat.username}"
+        else:
+            # Для приватных чатов создаем инвайт-ссылку
+            try:
+                invite_link = await chat.export_invite_link()
+                chat_link = invite_link
+            except:
+                chat_link = "Не удалось получить ссылку на чат"
+        
+        # Формируем сообщение с активными ссылками
+        message_text = (
+            f"🔗 Ссылка на этот чат: {chat_link}\n"
+            f"👤 Ссылка на @SrachC0NF: https://t.me/SrachC0NF"
+        )
+        
+        await update.message.reply_text(message_text)
+        
+    except Exception as e:
+        logging.error(f"Ошибка в команде /ss: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при получении ссылок")
+
+async def track_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отслеживаем новых участников и сохраняем время их вступления"""
+    if update.message and update.message.new_chat_members:
+        for new_member in update.message.new_chat_members:
+            if not new_member.is_bot:  # Игнорируем ботов
+                user_join_times[new_member.id] = {
+                    'user': new_member,
+                    'join_time': update.message.date,
+                    'message_id': update.message.message_id
+                }
+                username = new_member.username or f"User_{new_member.id}"
+                logging.info(f"✅ Записан новый участник: {username} в {update.message.date}")
+
+async def delh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /delh для удаления новых участников"""
+    
+    # Проверяем, что команда вызвана в групповом чате
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("Эта команда работает только в групповых чатах!")
+        return
+    
+    # Проверяем права пользователя
+    user = await update.effective_chat.get_member(update.effective_user.id)
+    if user.status not in ["administrator", "creator"]:
+        await update.message.reply_text("Только администраторы могут использовать эту команду!")
+        return
+    
+    try:
+        await update.message.reply_text("🔍 Поиск новых участников для удаления...")
+        
+        deleted_count = 0
+        one_hour_ago = datetime.now(pytz.utc) - timedelta(hours=1)
+        
+        # Получаем список администраторов для исключения
+        admins = await update.effective_chat.get_administrators()
+        admin_ids = [admin.user.id for admin in admins]
+        
+        # Ищем участников, которые присоединились за последний час
+        recent_members = []
+        for user_id, user_data in user_join_times.items():
+            if user_data['join_time'] > one_hour_ago:
+                recent_members.append(user_data)
+        
+        # Если в кэше нет, проверяем историю чата
+        if not recent_members:
+            try:
+                await update.message.reply_text("🔎 Проверяем историю чата...")
+                message_count = 0
+                async for message in context.bot.get_chat_history(update.effective_chat.id, limit=50):
+                    message_count += 1
+                    if message.new_chat_members and message.date > one_hour_ago:
+                        for new_member in message.new_chat_members:
+                            if not new_member.is_bot and new_member.id not in admin_ids:
+                                recent_members.append({
+                                    'user': new_member,
+                                    'join_time': message.date,
+                                    'message_id': message.message_id
+                                })
+                                # Сохраняем в кэш
+                                user_join_times[new_member.id] = {
+                                    'user': new_member,
+                                    'join_time': message.date,
+                                    'message_id': message.message_id
+                                }
+                logging.info(f"Проверено сообщений: {message_count}, найдено участников: {len(recent_members)}")
+            except Exception as e:
+                logging.warning(f"Не удалось проверить историю чата: {e}")
+        
+        if not recent_members:
+            await update.message.reply_text("✅ Новых участников за последний час не найдено.")
+            return
+        
+        # Удаляем участников
+        for member_data in recent_members:
+            try:
+                user = member_data['user']
+                
+                # Пропускаем администраторов и ботов
+                if user.id in admin_ids or user.is_bot:
+                    continue
+                
+                # Удаляем участника
+                await update.effective_chat.ban_member(
+                    user.id,
+                    until_date=int((datetime.now() + timedelta(minutes=1)).timestamp())
+                )
+                deleted_count += 1
+                
+                # Удаляем сообщение о вступлении если возможно
+                try:
+                    if 'message_id' in member_data:
+                        await context.bot.delete_message(
+                            chat_id=update.effective_chat.id,
+                            message_id=member_data['message_id']
+                        )
+                except:
+                    pass  # Игнорируем ошибки удаления сообщения
+                
+                # Логируем удаление
+                username = user.username or f"User_{user.id}"
+                join_time = member_data['join_time'].strftime("%H:%M:%S")
+                logging.info(f"🗑️ Удален пользователь: {username} ({user.id}) - присоединился: {join_time}")
+                
+                # Удаляем из словаря
+                if user.id 
